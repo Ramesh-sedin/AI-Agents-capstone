@@ -160,7 +160,7 @@ def get_refund_policy(plan: str) -> dict:
 
 
 def send_reply(ticket_id: int, message: str) -> dict:
-    """Write a customer-facing reply. It validates both fields and is the only tool in this module that changes data."""
+    """Propose a customer-facing reply for an existing ticket. This never sends or writes automatically; the program requires human approval and rejected proposals must be revised."""
     if isinstance(ticket_id, bool) or not isinstance(ticket_id, int) or ticket_id <= 0:
         return {"error": "ticket_id must be a positive integer"}
     if not isinstance(message, str) or not message.strip():
@@ -172,8 +172,27 @@ def send_reply(ticket_id: int, message: str) -> dict:
     try:
         with _connect() as conn:
             ticket = conn.execute("SELECT id FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
-            if not ticket:
-                return {"error": f"Ticket {ticket_id} was not found. The reply was not sent."}
+    except sqlite3.Error as exc:
+        return {"error": f"Database error while validating reply: {exc}"}
+    if not ticket:
+        return {"error": f"Ticket {ticket_id} was not found. The reply was not sent."}
+
+    return {
+        "approved_to_send": False,
+        "ticket_id": ticket_id,
+        "proposed_reply": message,
+        "status": "pending_human_approval",
+    }
+
+
+def persist_approved_reply(ticket_id: int, message: str) -> dict:
+    """Private state-changing function; caller must obtain explicit human approval before invoking it."""
+    validation = send_reply(ticket_id, message)
+    if "error" in validation:
+        return validation
+
+    try:
+        with _connect() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS replies (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,13 +204,49 @@ def send_reply(ticket_id: int, message: str) -> dict:
             """)
             conn.execute(
                 "INSERT INTO replies (ticket_id, message) VALUES (?, ?)",
-                (ticket_id, message),
+                (ticket_id, message.strip()),
             )
             conn.commit()
     except sqlite3.Error as exc:
-        return {"error": f"Database error while sending reply: {exc}"}
+        return {"error": f"Database error while sending approved reply: {exc}"}
 
     return {"sent": True, "ticket_id": ticket_id, "message": _trim(message, 500)}
+
+
+def escalate(ticket_id: int, reason: str) -> dict:
+    """Assign an existing ticket and concise reason to the human queue, ending automated handling. Use it for uncertainty, security, unsupported refunds, or actions outside agent authority."""
+    if isinstance(ticket_id, bool) or not isinstance(ticket_id, int) or ticket_id <= 0:
+        return {"error": "ticket_id must be a positive integer"}
+    if not isinstance(reason, str) or not reason.strip():
+        return {"error": "reason must be a non-empty string"}
+    reason = reason.strip()
+    if len(reason) > 1000:
+        return {"error": "reason must be 1000 characters or fewer"}
+
+    try:
+        with _connect() as conn:
+            ticket = conn.execute("SELECT id FROM tickets WHERE id = ?", (ticket_id,)).fetchone()
+            if not ticket:
+                return {"error": f"Ticket {ticket_id} was not found. It was not escalated."}
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS escalations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticket_id INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'human_queue',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+                )
+            """)
+            conn.execute(
+                "INSERT INTO escalations (ticket_id, reason) VALUES (?, ?)",
+                (ticket_id, reason),
+            )
+            conn.commit()
+    except sqlite3.Error as exc:
+        return {"error": f"Database error while escalating ticket: {exc}"}
+
+    return {"escalated": True, "ticket_id": ticket_id, "queue": "human_queue", "reason": _trim(reason, 500)}
 
 
 FUNCTION_DECLARATIONS = [
@@ -226,11 +281,19 @@ FUNCTION_DECLARATIONS = [
     ),
     types.FunctionDeclaration(
         name="send_reply",
-        description="Write a customer-facing reply to an existing ticket. This is the only action that changes support data; verify ticket_id and the final message before calling it.",
+        description="Propose a customer-facing reply for an existing ticket. This never sends or writes automatically; the program requires human approval and rejected proposals must be revised.",
         parameters=types.Schema(type="OBJECT", properties={
             "ticket_id": types.Schema(type="INTEGER", description="Positive numeric ID of the existing ticket"),
-            "message": types.Schema(type="STRING", description="Final customer-facing reply, from 1 to 5000 characters"),
+            "message": types.Schema(type="STRING", description="Proposed customer-facing reply, from 1 to 5000 characters"),
         }, required=["ticket_id", "message"]),
+    ),
+    types.FunctionDeclaration(
+        name="escalate",
+        description="Assign an existing ticket and concise reason to the human queue, ending automated handling. Use it for uncertainty, security, unsupported refunds, or actions outside agent authority.",
+        parameters=types.Schema(type="OBJECT", properties={
+            "ticket_id": types.Schema(type="INTEGER", description="Positive numeric ID of the existing ticket"),
+            "reason": types.Schema(type="STRING", description="Clear reason for human escalation, up to 1000 characters"),
+        }, required=["ticket_id", "reason"]),
     ),
 ]
 
@@ -240,4 +303,5 @@ TOOL_REGISTRY = {
     "get_customer_history": get_customer_history,
     "get_refund_policy": get_refund_policy,
     "send_reply": send_reply,
+    "escalate": escalate,
 }

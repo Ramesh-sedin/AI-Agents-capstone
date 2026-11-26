@@ -80,3 +80,19 @@ python -m unittest test_context.py
 ```
 
 Compaction keeps the original goal, a ticket snapshot captured from `get_ticket`, a short summary of recent tool observations, and a configurable number of recent messages. The system prompt remains separate and stable in `GenerateContentConfig` on every model call.
+
+## Part 5 guardrails and human approval
+
+`send_reply` only creates a proposed reply; it does not write. The terminal requires `a`/`r` approval. A rejection and reason are returned to the agent as a tool result so it can revise the reply.
+
+`escalate(ticket_id, reason)` assigns an approved ticket to the `human_queue` and ends the run.
+
+Hard limits are code-enforced by `--max-iterations`, `--token-budget`, and `--tool-call-cap`.
+
+API-free demonstrations:
+
+```bash
+python agent.py --approval-demo
+python agent.py --tool-cap-demo --tool-call-cap 2
+python -m unittest test_guardrails.py test_tools.py test_context.py
+```

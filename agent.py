@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from tools import FUNCTION_DECLARATIONS, TOOL_REGISTRY
+from tools import FUNCTION_DECLARATIONS, TOOL_REGISTRY, persist_approved_reply, send_reply
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -66,6 +66,40 @@ def compact_messages(
     return preserved, summary
 
 
+def request_reply_approval(ticket_id: int, message: str, input_fn=input) -> tuple[bool, str]:
+    """Show a proposed reply and require an explicit human approve/reject decision."""
+    print("\nHUMAN APPROVAL REQUIRED")
+    print(f"Ticket: {ticket_id}")
+    print("Proposed reply:")
+    print(message)
+    while True:
+        answer = input_fn("Approve this reply? [a]pprove / [r]eject: ").strip().lower()
+        if answer in {"a", "approve", "y", "yes"}:
+            return True, "Approved by human reviewer"
+        if answer in {"r", "reject", "n", "no"}:
+            reason = input_fn("Rejection reason (returned to agent): ").strip()
+            return False, reason or "Human reviewer rejected the proposed reply"
+        print("Please enter 'a' to approve or 'r' to reject.")
+
+
+def request_escalation_approval(ticket_id: int, reason: str, input_fn=input) -> bool:
+    """Require explicit human confirmation before assigning a ticket to the human queue."""
+    print("\nHUMAN ESCALATION APPROVAL REQUIRED")
+    print(f"Ticket: {ticket_id}")
+    print(f"Reason: {reason}")
+    answer = input_fn("Confirm escalation? [y]es / [n]o: ").strip().lower()
+    return answer in {"y", "yes"}
+
+
+def enforce_tool_cap(tool_name: str, tool_call_counts: dict, tool_call_cap: int) -> str | None:
+    """Enforce a code-level cap independently of model instructions."""
+    count = tool_call_counts.get(tool_name, 0)
+    if count >= tool_call_cap:
+        return f"Stopped: per-tool call cap reached for '{tool_name}' ({tool_call_cap} calls)."
+    tool_call_counts[tool_name] = count + 1
+    return None
+
+
 def usage_total(response: types.GenerateContentResponse) -> int:
     metadata = getattr(response, "usage_metadata", None)
     if metadata is None:
@@ -80,6 +114,8 @@ def run_agent(
     impossible: bool = False,
     context_threshold: int = 10,
     keep_recent: int = 4,
+    tool_call_cap: int = 3,
+    input_fn=input,
 ) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -91,6 +127,7 @@ def run_agent(
     original_ticket = None
     tool_observations = []
     cumulative_tokens = 0
+    tool_call_counts = {}
 
     for iteration in range(1, max_iterations + 1):
         response = client.models.generate_content(
@@ -143,11 +180,55 @@ def run_agent(
             if tool is None:
                 result = {"error": f"Unknown tool: {name}"}
             else:
+                cap_message = enforce_tool_cap(name, tool_call_counts, tool_call_cap)
+                if cap_message:
+                    print(cap_message)
+                    return cap_message
+
                 try:
-                    result = tool(**args)
+                    if name == "send_reply":
+                        proposal = tool(**args)
+                        if "error" in proposal:
+                            result = proposal
+                        else:
+                            approved, reason = request_reply_approval(
+                                proposal["ticket_id"],
+                                proposal["proposed_reply"],
+                                input_fn=input_fn,
+                            )
+                            if approved:
+                                result = persist_approved_reply(proposal["ticket_id"], proposal["proposed_reply"])
+                                if isinstance(result, dict) and result.get("sent"):
+                                    print("  Approved reply sent.")
+                                    return "Human approved the proposed reply and it was sent."
+                            else:
+                                result = {
+                                    "approved": False,
+                                    "status": "rejected",
+                                    "revision_required": True,
+                                    "reason": reason,
+                                }
+                    elif name == "escalate":
+                        ticket_id = args.get("ticket_id")
+                        reason = args.get("reason")
+                        if not isinstance(ticket_id, int) or isinstance(ticket_id, bool) or ticket_id <= 0:
+                            result = {"error": "ticket_id must be a positive integer"}
+                        elif not isinstance(reason, str) or not reason.strip():
+                            result = {"error": "reason must be a non-empty string"}
+                        else:
+                            confirmed = request_escalation_approval(ticket_id, reason.strip(), input_fn=input_fn)
+                            if not confirmed:
+                                result = {"escalated": False, "status": "human_rejected_escalation", "revision_required": True}
+                            else:
+                                result = tool(**args)
+                                if isinstance(result, dict) and result.get("escalated"):
+                                    print("  Escalation approved and assigned to the human queue.")
+                                    return "Human approved escalation; the ticket is assigned to the human queue."
+                    else:
+                        result = tool(**args)
                 except TypeError as exc:
                     result = {"error": f"Invalid arguments: {exc}"}
-                except Exception as exc:  # Catch-all for any other exceptions
+                except Exception as exc:
                     result = {"error": f"Error: {exc}"}
             print(f"  Tool result: {result}")
             tool_observations.append({"name": name, "args": args, "result": result})
@@ -182,6 +263,9 @@ def main() -> None:
     parser.add_argument("--context-threshold", type=int, default=10, help="Compact when message count exceeds this value")
     parser.add_argument("--keep-recent", type=int, default=4, help="Number of recent messages retained after compaction")
     parser.add_argument("--compaction-demo", action="store_true", help="Demonstrate context compaction without a Gemini API call")
+    parser.add_argument("--tool-call-cap", type=int, default=3, help="Maximum calls allowed for any single tool in one run")
+    parser.add_argument("--approval-demo", action="store_true", help="Demonstrate reject, revise, and approve without Gemini")
+    parser.add_argument("--tool-cap-demo", action="store_true", help="Demonstrate a clean per-tool cap stop without Gemini")
     args = parser.parse_args()
 
     if args.compaction_demo:
@@ -199,6 +283,32 @@ def main() -> None:
         print(f"After compaction: messages={len(compacted)}")
         print(summary)
         print("System prompt preserved separately by GenerateContentConfig; original goal and ticket retained in messages.")
+        return
+    elif args.approval_demo:
+        answers = iter(["r", "Too formal and missing the specific next step", "a"])
+        input_answers = lambda prompt: next(answers)
+
+        first = send_reply(7, "We have reviewed your issue and will respond in due course.")
+        approved, reason = request_reply_approval(7, first["proposed_reply"], input_fn=input_answers)
+        print(f"First proposal rejected: {reason}")
+
+        revised = send_reply(7, "Please try the new password-reset link. If it expires again, reply with the exact expiry time and we will investigate.")
+        approved, reason = request_reply_approval(7, revised["proposed_reply"], input_fn=input_answers)
+        if approved:
+            result = persist_approved_reply(7, revised["proposed_reply"])
+            print("Second proposal approved:")
+            print(result)
+        return
+    elif args.tool_cap_demo:
+        counts = {}
+        for call_number in range(1, args.tool_call_cap + 2):
+            cap_message = enforce_tool_cap("get_ticket", counts, args.tool_call_cap)
+            if cap_message:
+                print(cap_message)
+                print("Final answer:")
+                print(cap_message)
+                return
+            print(f"get_ticket call {call_number} allowed")
         return
     elif args.demo:
         goal = (
@@ -223,6 +333,7 @@ def main() -> None:
         impossible=args.impossible,
         context_threshold=args.context_threshold,
         keep_recent=args.keep_recent,
+        tool_call_cap=args.tool_call_cap,
     )
     print("\nFinal answer:")
     print(answer)

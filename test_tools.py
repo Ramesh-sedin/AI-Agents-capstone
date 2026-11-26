@@ -65,12 +65,24 @@ class ToolTests(unittest.TestCase):
         result = tools.search_tickets("charge")
         self.assertLessEqual(result["count"], 5)
 
-    def test_send_reply_is_the_only_write(self):
-        result = tools.send_reply(1, "We are reviewing this charge.")
+    def test_send_reply_only_proposes_and_persist_requires_explicit_call(self):
+        proposal = tools.send_reply(1, "We are reviewing this charge.")
+        self.assertFalse(proposal["approved_to_send"])
+        self.assertEqual(proposal["status"], "pending_human_approval")
+        with tools._connect() as conn:
+            table = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='replies'").fetchone()
+        self.assertIsNone(table)
+
+        result = tools.persist_approved_reply(1, proposal["proposed_reply"])
         self.assertTrue(result["sent"])
         with tools._connect() as conn:
             reply = conn.execute("SELECT message FROM replies WHERE ticket_id = 1").fetchone()
         self.assertEqual(reply["message"], "We are reviewing this charge.")
+
+    def test_escalate_writes_to_human_queue(self):
+        result = tools.escalate(1, "Security verification is required")
+        self.assertTrue(result["escalated"])
+        self.assertEqual(result["queue"], "human_queue")
 
     def test_declarations_have_names_descriptions_and_schemas(self):
         declarations = {item.name: item for item in tools.FUNCTION_DECLARATIONS}
