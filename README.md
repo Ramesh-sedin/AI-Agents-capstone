@@ -56,3 +56,27 @@ The five tools are:
 - `send_reply(ticket_id, message)` — writes the only mutable action, a ticket reply
 
 See `tools_note.md` for the tool-description rewrite note.
+
+## Part 4 context and instructions
+
+The stable support-agent policy is in `system_prompt.md`; its comment block records the prompt specificity decisions.
+
+Demonstrate context compaction without calling Gemini:
+
+```bash
+python agent.py --compaction-demo --keep-recent 4
+```
+
+Run a live agent with a lower compaction threshold:
+
+```bash
+python agent.py --demo --context-threshold 10 --keep-recent 4
+```
+
+Run API-free context tests:
+
+```bash
+python -m unittest test_context.py
+```
+
+Compaction keeps the original goal, a ticket snapshot captured from `get_ticket`, a short summary of recent tool observations, and a configurable number of recent messages. The system prompt remains separate and stable in `GenerateContentConfig` on every model call.
