@@ -36,3 +36,23 @@ python agent.py "Triage ticket 4 and mark it resolved"
 ```
 
 The loop prints message count and cumulative token usage every iteration. It stops when the model returns a final answer, the maximum iteration count is reached, or the token budget is exceeded.
+
+## Part 3 tools
+
+Tool implementations and Gemini function declarations are in `tools.py`; the agent imports the same registry used by the loop.
+
+Run API-free tool tests:
+
+```bash
+python -m unittest test_tools.py
+```
+
+The five tools are:
+
+- `get_ticket(ticket_id)` — returns ticket and customer details
+- `search_tickets(query, category=None)` — searches past resolved tickets, maximum five results
+- `get_customer_history(customer_id)` — returns resolved history for a customer
+- `get_refund_policy(plan)` — returns a fixed plan-tier refund policy
+- `send_reply(ticket_id, message)` — writes the only mutable action, a ticket reply
+
+See `tools_note.md` for the tool-description rewrite note.
