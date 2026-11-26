@@ -14,3 +14,25 @@ python test_key.py
 ```
 
 The API key is read from the `GEMINI_API_KEY` environment variable (loaded through `.env`) and must never be committed.
+
+## Part 2 agent loop
+
+Run the simple end-to-end demo:
+
+```bash
+python agent.py --demo
+```
+
+Run the deliberately impossible demo, which stops at the iteration cap:
+
+```bash
+python agent.py --impossible --max-iterations 3
+```
+
+Run a custom goal:
+
+```bash
+python agent.py "Triage ticket 4 and mark it resolved"
+```
+
+The loop prints message count and cumulative token usage every iteration. It stops when the model returns a final answer, the maximum iteration count is reached, or the token budget is exceeded.

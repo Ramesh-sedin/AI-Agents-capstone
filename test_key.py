@@ -14,7 +14,7 @@ if not os.getenv("GEMINI_API_KEY"):
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 response = client.models.generate_content(
-    model="gemini-2.5-flash",
+    model="gemini-3.5-flash",
     contents="Reply with exactly: Gemini API key works",
 )
 print(response.text)
