@@ -3,6 +3,7 @@
 import argparse
 import os
 import re
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -10,6 +11,7 @@ from google import genai
 from google.genai import types
 
 from tools import FUNCTION_DECLARATIONS, TOOL_REGISTRY, get_refund_policy, get_ticket, persist_approved_reply, send_reply
+from trace_utils import add_iteration, finish_run_trace, new_run_trace, write_run_trace
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -128,8 +130,34 @@ def run_agent(
     tool_observations = []
     cumulative_tokens = 0
     tool_call_counts = {}
+    trace = new_run_trace(goal)
+    trace_started = time.monotonic()
+
+    def record_iteration(final_text: str | None = None) -> None:
+        elapsed = (time.monotonic() - iteration_started) * 1000
+        add_iteration(
+            trace,
+            iteration,
+            elapsed,
+            tokens_used,
+            cumulative_tokens,
+            tool_requests,
+            tool_results,
+            final_text,
+        )
+
+    def finish(answer: str, stop_reason: str) -> str:
+        finalized = finish_run_trace(trace, stop_reason, answer)
+        path = write_run_trace(finalized)
+        print(f"Trace written: {path}")
+        return answer
 
     for iteration in range(1, max_iterations + 1):
+        iteration_started = time.monotonic()
+        tool_requests = []
+        tool_results = []
+        tokens_used = 0
+
         response = client.models.generate_content(
             model="gemini-3.5-flash",
             contents=messages,
@@ -140,7 +168,8 @@ def run_agent(
             ),
         )
 
-        cumulative_tokens += usage_total(response)
+        tokens_used = usage_total(response)
+        cumulative_tokens += tokens_used
         candidate = response.candidates[0] if getattr(response, "candidates", None) else None
         model_content = getattr(candidate, "content", None)
 
@@ -157,24 +186,31 @@ def run_agent(
 
         if cumulative_tokens > token_budget:
             print(f"Stopped: token budget exceeded ({cumulative_tokens} > {token_budget}).")
-            return "Stopped because the token budget was exceeded."
+            record_iteration("Stopped because the token budget was exceeded.")
+            return finish("Stopped because the token budget was exceeded.", "token_budget")
 
         if not function_calls:
             if impossible:
                 if iteration >= max_iterations:
+                    final_answer = "Stopped because the maximum iteration count was reached."
                     print(f"Stopped: maximum iteration count reached ({max_iterations}).")
-                    return "Stopped because the maximum iteration count was reached."
+                    record_iteration(final_answer)
+                    return finish(final_answer, "max_iterations")
                 messages.append(types.Content(
                     role="user",
                     parts=[types.Part(text="The task is impossible. Do not stop; continue attempting tool calls and searching for the non-existent ticket until you reach the iteration limit.")],
                 ))
+                record_iteration("Impossible mode continued")
                 continue
-            return response.text or "Stopped with no final text answer."
+            final_answer = response.text or "Stopped with no final text answer."
+            record_iteration(final_answer)
+            return finish(final_answer, "final_answer")
 
         tool_parts = []
         for call in function_calls:
             name = call.name
             args = dict(call.args or {})
+            tool_requests.append({"name": name, "arguments": args})
             print(f"  Tool call: {name}({args})")
             tool = TOOL_REGISTRY.get(name)
             if tool is None:
@@ -183,7 +219,8 @@ def run_agent(
                 cap_message = enforce_tool_cap(name, tool_call_counts, tool_call_cap)
                 if cap_message:
                     print(cap_message)
-                    return cap_message
+                    record_iteration(cap_message)
+                    return finish(cap_message, "tool_call_cap")
 
                 try:
                     if name == "send_reply":
@@ -200,7 +237,9 @@ def run_agent(
                                 result = persist_approved_reply(proposal["ticket_id"], proposal["proposed_reply"])
                                 if isinstance(result, dict) and result.get("sent"):
                                     print("  Approved reply sent.")
-                                    return "Human approved the proposed reply and it was sent."
+                                    tool_results.append({"name": name, "result": result})
+                                    record_iteration("Human approved reply")
+                                    return finish("Human approved the proposed reply and it was sent.", "human_approved_reply")
                             else:
                                 result = {
                                     "approved": False,
@@ -223,7 +262,9 @@ def run_agent(
                                 result = tool(**args)
                                 if isinstance(result, dict) and result.get("escalated"):
                                     print("  Escalation approved and assigned to the human queue.")
-                                    return "Human approved escalation; the ticket is assigned to the human queue."
+                                    tool_results.append({"name": name, "result": result})
+                                    record_iteration("Human approved escalation")
+                                    return finish("Human approved escalation; the ticket is assigned to the human queue.", "human_approved_escalation")
                     else:
                         result = tool(**args)
                 except TypeError as exc:
@@ -232,6 +273,7 @@ def run_agent(
                     result = {"error": f"Error: {exc}"}
             print(f"  Tool result: {result}")
             tool_observations.append({"name": name, "args": args, "result": result})
+            tool_results.append({"name": name, "result": result})
             if name == "get_ticket" and isinstance(result, dict) and "error" not in result:
                 original_ticket = result
             tool_parts.append(types.Part.from_function_response(name=name, response={"result": result}))
@@ -249,8 +291,14 @@ def run_agent(
             )
             print(f"Context compaction: messages={old_count}->{len(messages)} (threshold={context_threshold})")
 
+        record_iteration(response.text)
+
+    record_iteration("Tool calls completed")
+
+    final_answer = "Stopped because the maximum iteration count was reached."
     print(f"Stopped: maximum iteration count reached ({max_iterations}).")
-    return "Stopped because the maximum iteration count was reached."
+    record_iteration(final_answer)
+    return finish(final_answer, "max_iterations")
 
 
 def main() -> None:
@@ -349,6 +397,4 @@ def main() -> None:
     print("\nFinal answer:")
     print(answer)
 
-
-if __name__ == "__main__":
-    main()
+    finish_run_trace(answer, metadata={"goal": goal, "args": vars(args)})

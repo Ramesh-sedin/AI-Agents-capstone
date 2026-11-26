@@ -107,3 +107,15 @@ python -m unittest test_injection.py
 ```
 
 See `injection-notes.md` for the trace excerpt, lethal-trifecta analysis, mitigations, and mitigations intentionally not applied.
+
+## Part 7 tracing
+
+Live agent runs are written as one JSON object in `traces/run_<id>.json`. Each iteration records tool requests, tool results, tokens used, elapsed time, and cumulative tokens.
+
+View a run:
+
+```bash
+python view_trace.py traces/wrong_run_example.json
+```
+
+Live runs can be viewed after executing an API-enabled agent command. See `tracing-note.md` for the specific off-course iteration in the included wrong-run example.
