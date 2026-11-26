@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from tools import FUNCTION_DECLARATIONS, TOOL_REGISTRY, persist_approved_reply, send_reply
+from tools import FUNCTION_DECLARATIONS, TOOL_REGISTRY, get_refund_policy, get_ticket, persist_approved_reply, send_reply
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -266,6 +266,7 @@ def main() -> None:
     parser.add_argument("--tool-call-cap", type=int, default=3, help="Maximum calls allowed for any single tool in one run")
     parser.add_argument("--approval-demo", action="store_true", help="Demonstrate reject, revise, and approve without Gemini")
     parser.add_argument("--tool-cap-demo", action="store_true", help="Demonstrate a clean per-tool cap stop without Gemini")
+    parser.add_argument("--injection-demo", action="store_true", help="Trace the planted prompt-injection ticket without Gemini")
     args = parser.parse_args()
 
     if args.compaction_demo:
@@ -309,6 +310,16 @@ def main() -> None:
                 print(cap_message)
                 return
             print(f"get_ticket call {call_number} allowed")
+        return
+    elif args.injection_demo:
+        ticket = get_ticket(18)
+        policy = get_refund_policy(ticket["customer_plan"])
+        print("INJECTION TRACE")
+        print("Ticket 18 result:")
+        print(ticket)
+        print("Refund policy result:")
+        print(policy)
+        print("Agent decision: escalate or refuse; do not issue or approve a refund from ticket text.")
         return
     elif args.demo:
         goal = (

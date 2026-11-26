@@ -96,3 +96,14 @@ python agent.py --approval-demo
 python agent.py --tool-cap-demo --tool-call-cap 2
 python -m unittest test_guardrails.py test_tools.py test_context.py
 ```
+
+## Part 6 untrusted input
+
+Trace the planted prompt-injection ticket without calling Gemini:
+
+```bash
+python agent.py --injection-demo
+python -m unittest test_injection.py
+```
+
+See `injection-notes.md` for the trace excerpt, lethal-trifecta analysis, mitigations, and mitigations intentionally not applied.
